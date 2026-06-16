@@ -1,6 +1,8 @@
 package main
 
 import (
+	"time"
+
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/driver/desktop"
@@ -22,6 +24,8 @@ func isSetupComplete(cfg *config.Config) bool {
 }
 
 func main() {
+	maybeInstall()
+
 	a := app.NewWithID(appID)
 
 	idle, ready, warning, running := loadIcons()
@@ -66,6 +70,13 @@ func main() {
 	w := a.NewWindow(appName)
 	w.Resize(fyne.NewSize(720, 540))
 	w.SetCloseIntercept(func() { w.Hide() })
+	w.SetMainMenu(fyne.NewMainMenu(
+		fyne.NewMenu("Help",
+			fyne.NewMenuItem("About WifiSync", func() {
+				ui.ShowAboutDialog(a.Metadata().Version, w)
+			}),
+		),
+	))
 
 	if desk, ok := a.(desktop.App); ok {
 		desk.SetSystemTrayIcon(idle)
@@ -76,6 +87,10 @@ func main() {
 			}),
 			fyne.NewMenuItem("Sync Now", sw.TriggerSync),
 			fyne.NewMenuItemSeparator(),
+			fyne.NewMenuItem("About", func() {
+				w.Show()
+				ui.ShowAboutDialog(a.Metadata().Version, w)
+			}),
 			fyne.NewMenuItem("Exit", func() {
 				a.Quit()
 			}),
@@ -94,7 +109,13 @@ func main() {
 
 	if isSetupComplete(cfg) {
 		startNormal()
-		w.Hide()
+		if sw.HasInterruptedSync() {
+			w.Show()
+			// Delay so the Fyne event loop is running before the dialog appears.
+			time.AfterFunc(300*time.Millisecond, sw.ShowResumePrompt)
+		} else {
+			w.Hide()
+		}
 	} else {
 		w.SetContent(ui.BuildFirstRunPanel(cfg, cfgPath, w, startNormal))
 		w.Show()

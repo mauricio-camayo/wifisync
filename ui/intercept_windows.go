@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
@@ -23,12 +24,16 @@ const (
 )
 
 var (
-	user32           = windows.NewLazySystemDLL("user32.dll")
-	pRegisterClassEx = user32.NewProc("RegisterClassExW")
-	pCreateWindowEx  = user32.NewProc("CreateWindowExW")
-	pDefWindowProc   = user32.NewProc("DefWindowProcW")
-	pGetMessage      = user32.NewProc("GetMessageW")
-	pDispatchMessage = user32.NewProc("DispatchMessageW")
+	kernel32                    = windows.NewLazySystemDLL("kernel32.dll")
+	pGetModuleHandle            = kernel32.NewProc("GetModuleHandleW")
+	user32                      = windows.NewLazySystemDLL("user32.dll")
+	pRegisterClassEx            = user32.NewProc("RegisterClassExW")
+	pCreateWindowEx             = user32.NewProc("CreateWindowExW")
+	pDefWindowProc              = user32.NewProc("DefWindowProcW")
+	pGetMessage                 = user32.NewProc("GetMessageW")
+	pDispatchMessage            = user32.NewProc("DispatchMessageW")
+	pShutdownBlockReasonCreate  = user32.NewProc("ShutdownBlockReasonCreate")
+	pShutdownBlockReasonDestroy = user32.NewProc("ShutdownBlockReasonDestroy")
 )
 
 // wndclassex mirrors WNDCLASSEXW for 64-bit Windows (cbSize = 80).
@@ -66,6 +71,10 @@ var interceptState struct {
 	win fyne.Window
 }
 
+// shutdownApproved lets WM_QUERYENDSESSION pass through after the user
+// has chosen "Stop sync and shut down" and we re-initiate shutdown ourselves.
+var shutdownApproved atomic.Bool
+
 // RegisterShutdownInterceptor starts a hidden Windows message window that
 // receives WM_QUERYENDSESSION and blocks a shutdown while a sync is running.
 func RegisterShutdownInterceptor(win fyne.Window, sw *StatusWindow) {
@@ -77,21 +86,38 @@ func RegisterShutdownInterceptor(win fyne.Window, sw *StatusWindow) {
 }
 
 // wndProc is the window procedure for the hidden interceptor window.
-// It runs on the message-pump goroutine and may block for up to 60 s
-// while showing the shutdown dialog.
+// It must return quickly — never block here. Dialog work runs in a goroutine.
 func wndProc(hwnd, message, wParam, lParam uintptr) uintptr {
 	switch uint32(message) {
 	case wmQueryEndSession:
+		if shutdownApproved.Load() {
+			return 1 // we chose to shut down — allow
+		}
 		interceptState.Lock()
 		sw := interceptState.sw
 		win := interceptState.win
 		interceptState.Unlock()
 		if sw != nil && sw.IsSyncRunning() {
-			return handleShutdownWhileSyncing(win, sw)
+			// Register a block reason so Windows shows "blocking apps" screen
+			// and waits instead of force-killing us.
+			reason, _ := windows.UTF16PtrFromString("Backup sync in progress")
+			pShutdownBlockReasonCreate.Call(hwnd, uintptr(unsafe.Pointer(reason)))
+			// Show the dialog asynchronously — must NOT block the message pump.
+			go handleShutdownWhileSyncing(hwnd, win, sw)
+			return 0 // FALSE: block shutdown
 		}
-		return 1 // TRUE: no sync running — allow shutdown immediately
+		return 1 // TRUE: no sync running — allow shutdown
 
 	case wmEndsession:
+		if wParam != 0 {
+			// Windows is ending the session despite our block (user force-closed).
+			interceptState.Lock()
+			sw := interceptState.sw
+			interceptState.Unlock()
+			if sw != nil {
+				sw.CancelSync()
+			}
+		}
 		return 0
 
 	default:
@@ -100,9 +126,10 @@ func wndProc(hwnd, message, wParam, lParam uintptr) uintptr {
 	}
 }
 
-// handleShutdownWhileSyncing shows a blocking dialog and returns 1 (allow) or
-// 0 (block) for WM_QUERYENDSESSION. Defaults to allow+cancel after 60 s.
-func handleShutdownWhileSyncing(win fyne.Window, sw *StatusWindow) uintptr {
+// handleShutdownWhileSyncing shows the interception dialog and then either
+// removes the shutdown block (user chose to wait) or cancels the sync and
+// re-initiates shutdown (user chose to stop and shut down).
+func handleShutdownWhileSyncing(hwnd uintptr, win fyne.Window, sw *StatusWindow) {
 	decided := make(chan bool, 1)
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -143,34 +170,45 @@ func handleShutdownWhileSyncing(win fyne.Window, sw *StatusWindow) uintptr {
 		decide(true) // default: cancel sync, allow shutdown
 	}()
 
-	result := <-decided
+	allowShutdown := <-decided
 	dlg.Hide()
-	if result {
-		return 1 // TRUE: allow shutdown
+	pShutdownBlockReasonDestroy.Call(hwnd)
+
+	if allowShutdown {
+		// Set flag before calling shutdown so our own WM_QUERYENDSESSION passes.
+		shutdownApproved.Store(true)
+		shutdownSystem()
 	}
-	return 0 // FALSE: block shutdown
+	// If !allowShutdown: block is removed, sync continues, user shuts down later.
 }
 
 func runInterceptorLoop() {
+	hInst, _, _ := pGetModuleHandle.Call(0) // 0 = current module
 	className, _ := syscall.UTF16PtrFromString("WifiSyncInterceptor")
 	cb := syscall.NewCallback(wndProc)
 
 	var wc wndclassex
 	wc.cbSize = uint32(unsafe.Sizeof(wc))
 	wc.lpfnWndProc = cb
+	wc.hInstance = hInst
 	wc.lpszClassName = className
 	pRegisterClassEx.Call(uintptr(unsafe.Pointer(&wc)))
 
 	// Create an invisible top-level window. Top-level (non-message-only) windows
 	// receive WM_QUERYENDSESSION from the Windows session manager.
-	pCreateWindowEx.Call(
-		0,                                      // dwExStyle
-		uintptr(unsafe.Pointer(className)),     // lpClassName
-		uintptr(unsafe.Pointer(className)),     // lpWindowName
-		0,                                      // dwStyle (WS_OVERLAPPED, never shown)
-		0, 0, 0, 0,                             // x, y, w, h
-		0, 0, 0, 0,                             // hWndParent, hMenu, hInstance, lpParam
+	hwnd, _, _ := pCreateWindowEx.Call(
+		0,                                  // dwExStyle
+		uintptr(unsafe.Pointer(className)), // lpClassName
+		uintptr(unsafe.Pointer(className)), // lpWindowName
+		0,                                  // dwStyle (invisible, never shown)
+		0, 0, 0, 0,                         // x, y, w, h
+		0, 0,                               // hWndParent, hMenu
+		hInst,                               // hInstance — must match RegisterClassEx
+		0,                                  // lpParam
 	)
+	if hwnd == 0 {
+		return // window creation failed; shutdown interception unavailable
+	}
 
 	var m winmsg
 	for {

@@ -2,5 +2,5 @@
   Icon = "images/ready.png"
   Name = "WifiSync"
   ID = "io.wifisync.app"
-  Version = "1.1.0"
-  Build = 5
+  Version = "1.2.0"
+  Build = 9

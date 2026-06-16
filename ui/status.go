@@ -414,6 +414,37 @@ func (sw *StatusWindow) showUnknownAPDialog(ssid, bssid string) {
 	dlg.Show()
 }
 
+// HasInterruptedSync reports whether the last sync event in the log indicates
+// a run that did not complete cleanly: either the app was killed mid-sync
+// (last entry is sync_started with no matching completion) or the sync was
+// explicitly cancelled.
+func (sw *StatusWindow) HasInterruptedSync() bool {
+	entries, _ := sw.log.Tail(20)
+	for i := len(entries) - 1; i >= 0; i-- {
+		switch entries[i].Event {
+		case logger.EventSyncStarted, logger.EventSyncCancelled:
+			return true
+		case logger.EventSyncComplete, logger.EventSyncFailed:
+			return false
+		}
+	}
+	return false
+}
+
+// ShowResumePrompt asks the user whether to run the previously interrupted sync.
+func (sw *StatusWindow) ShowResumePrompt() {
+	dialog.ShowConfirm(
+		"Incomplete Backup",
+		"Your last backup was interrupted or cancelled.\nWould you like to run it now?",
+		func(ok bool) {
+			if ok {
+				sw.TriggerSync()
+			}
+		},
+		sw.win,
+	)
+}
+
 func (sw *StatusWindow) refreshLog() {
 	entries, _ := sw.log.Tail(logTailSize)
 	for i, j := 0, len(entries)-1; i < j; i, j = i+1, j-1 {

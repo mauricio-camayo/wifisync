@@ -6,7 +6,6 @@ wifisync.exe
 fyne-cross/
 fyne_metadata_init.go
 Icon.png
-images/icon
 
 # Local task tracking — not for public repo
 TODO.md
