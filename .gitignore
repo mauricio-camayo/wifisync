@@ -1,0 +1,14 @@
+# Compiled binaries and release archives
+wifisync
+wifisync.exe
+dist/
+
+# fyne-cross build output (regenerated on each build)
+fyne-cross/
+fyne_metadata_init.go
+Icon.png
+images/icon
+
+# Local task tracking — not for public repo
+TODO.md
+PRIORITIES.md
