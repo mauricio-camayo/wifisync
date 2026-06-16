@@ -1,7 +1,6 @@
-# Compiled binaries and release archives
+# Compiled binaries
 wifisync
 wifisync.exe
-dist/
 
 # fyne-cross build output (regenerated on each build)
 fyne-cross/
