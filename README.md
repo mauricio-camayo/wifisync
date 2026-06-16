@@ -36,7 +36,7 @@ Once configured it runs silently in the system tray — no manual intervention n
 |---|---|
 | Grey | Running — no trusted network connected |
 | Green | Trusted network connected, sync eligible |
-| Animated | Sync in progress |
+| Blue (Animated) | Sync in progress |
 | Yellow | Last sync failed, or backup overdue |
 
 Right-click the tray icon for **Open**, **Sync Now**, and **Exit**.
